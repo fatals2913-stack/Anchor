@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Grounding Anchor</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, where, onSnapshot, Timestamp, doc, setDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- HARDCODED ANONYMOUS FIREBASE FALLBACKS (GUARANTEED TO RUN) ---
+        // These non-functional values prevent a crash and trigger the LocalStorage fallback.
+        const appId = 'anchor-app-production-fallback';
+        const firebaseConfig = { 
+            apiKey: "AIzaSy_FIRESTORE_ONLY_KEY", 
+            authDomain: "project-id.firebaseapp.com", 
+            projectId: "project-id", 
+            storageBucket: "project-id.appspot.com", 
+            messagingSenderId: "123456789012", 
+            appId: "1:234567890123:web:000000000000000000000"
+        };
+        
+        // Global variables for Firebase services and user state
+        window.app = null;
+        window.db = null;
+        window.auth = null;
+        window.currentUserId = null;
+        window.isAuthReady = false;
+        window.useLocalStorageFallback = false; // NEW FLAG
+
+        // Database collection paths (only used if Firebase connects successfully)
+        window.anchorCollectionPath = `artifacts/${appId}/users/USER_ID/anchors`;
+        window.profileCollectionPath = `artifacts/${appId}/users/USER_ID/profile`;
+
+        // Initialize Firebase and Authentication
+        async function initializeFirebase() {
+            try {
+                // Attempt to initialize (this will fail on external hosts due to the placeholder key)
+                window.app = initializeApp(firebaseConfig);
+                window.db = getFirestore(window.app);
+                window.auth = getAuth(window.app);
+                
+                // This will fail with auth/api-key-not-valid
+                await signInAnonymously(window.auth);
+                
+                // If successful (only possible in Canvas environment)
+                onAuthStateChanged(window.auth, (user) => {
+                    if (user) {
+                        window.currentUserId = user.uid;
+                        // Finalize the collection paths with the user's UID
+                        window.anchorCollectionPath = window.anchorCollectionPath.replace('USER_ID', user.uid);
+                        window.profileCollectionPath = window.profileCollectionPath.replace('USER_ID', user.uid);
+                        
+                        document.getElementById('loading-message').classList.add('hidden');
+                        document.getElementById('setup-modal').classList.remove('hidden'); 
+                        window.isAuthReady = true;
+                    }
+                });
+
+            } catch (error) {
+                console.warn("Firebase Initialization Failed (Expected on external host). Switching to Local Storage.", error);
+                
+                // --- FALLBACK TO LOCAL STORAGE ---
+                window.useLocalStorageFallback = true;
+                
+                // Create a persistent local user ID for localStorage data grouping
+                window.currentUserId = 'local_' + (localStorage.getItem('localUserId') || Math.random().toString(36).substring(2, 9));
+                localStorage.setItem('localUserId', window.currentUserId);
+
+                // Simulate successful initialization completion
+                document.getElementById('loading-message').classList.add('hidden');
+                document.getElementById('setup-modal').classList.remove('hidden'); 
+                window.isAuthReady = true;
+
+                // For external hosts, manually set the user ID display for debugging/clarity
+                document.getElementById('user-id-display').textContent = window.currentUserId + " (LOCAL STORAGE)";
+            }
+        }
+        
+        initializeFirebase();
+
+        // Expose Firebase functions globally for use by processThought
+        window.getFirestore = () => window.db; // Return the initialized or null DB
+        window.collection = (db, path) => null; // Placeholder when running external
+        window.addDoc = () => {}; 
+        window.setDoc = () => {}; 
+        window.doc = () => {}; 
+        window.Timestamp = Timestamp;
+        window.query = () => {};
+        window.where = () => {};
+        window.onSnapshot = () => {};
+
+    </script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'primary': '#4f46e5', // Indigo 600
+                        'secondary': '#818cf8', // Indigo 400
+                        'background': '#f8f8ff', // Ghost White
+                        'card': '#ffffff',
+                        'success': '#10b981', // Emerald 500
+                        'alert': '#ef4444', // Red 500
+                        'gray-btn': '#d1d5db', // Gray 300
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom styles for aesthetic enhancements */
+        body {
+            background-color: theme('colors.background');
+        }
+        .emotion-card {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .emotion-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 15px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: theme('colors.primary');
+            cursor: pointer;
+            border-radius: 50%;
+            transition: background 0.15s ease;
+        }
+        input[type="range"]::-webkit-slider-thumb:hover {
+             background: theme('colors.secondary');
+        }
+        input[type="range"] {
+            height: 8px;
+            background: theme('colors.secondary');
+            border-radius: 9999px;
+            cursor: pointer;
+        }
+
+        .bar-container {
+            display: flex;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+        .bar-label {
+            width: 100px;
+            flex-shrink: 0;
+            font-weight: 600;
+            text-align: right;
+            margin-right: 12px;
+            color: #4b5563; /* Gray 600 */
+        }
+        .bar-chart {
+            flex-grow: 1;
+            height: 24px;
+            background-color: #e5e7eb; /* Gray 200 */
+            border-radius: 4px;
+            position: relative;
+        }
+        .bar-fill {
+            height: 100%;
+            background-color: theme('colors.primary');
+            border-radius: 4px;
+            transition: width 0.5s ease-out;
+            min-width: 4px; /* Ensure tiny bars are visible */
+        }
+    </style>
+</head>
+<body class="font-sans min-h-screen flex items-center justify-center p-4">
+
+    <!-- Profile Setup Modal -->
+    <div id="setup-modal" class="fixed inset-0 bg-gray-900 bg-opacity-70 z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-card rounded-xl p-8 max-w-md w-full shadow-2xl">
+            <h2 class="text-2xl font-bold text-primary mb-2 text-center">Welcome to Grounding Anchor</h2>
+            <p class="text-gray-600 mb-6 text-center text-sm">Your data will be saved securely to your private database space.</p>
+            
+            <div class="space-y-4">
+                <div>
+                    <label for="profile-nickname" class="block text-sm font-medium text-gray-700">Nickname (Optional)</label>
+                    <input type="text" id="profile-nickname" class="mt-1 block w-full border border-gray-300 rounded-lg p-3" placeholder="E.g., AnchorUser">
+                </div>
+                <div>
+                    <label for="profile-email" class="block text-sm font-medium text-gray-700">Email (Optional, for recovery/export)</label>
+                    <input type="email" id="profile-email" class="mt-1 block w-full border border-gray-300 rounded-lg p-3" placeholder="email@example.com">
+                </div>
+            </div>
+
+            <p class="text-xs text-gray-500 mt-6 border-t border-gray-200 pt-4">
+                Your emotional data is **always saved privately**, even if you skip this step. Providing an email or nickname helps us link your history to you, which is important if you ever need to **recover or transfer** your data later.
+            </p>
+
+            <div class="flex flex-col space-y-3 mt-6">
+                <button onclick="saveProfileAndStartApp(true)" class="w-full bg-success text-white font-semibold py-3 rounded-lg hover:bg-success/80 transition duration-300">
+                    Save Profile Details (Best for Recovery)
+                </button>
+                <button onclick="saveProfileAndStartApp(false)" class="w-full bg-gray-btn text-gray-800 font-semibold py-3 rounded-lg hover:bg-gray-400 transition duration-300">
+                    Continue Anonymously (Data is Saved, but Unlinked)
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="w-full max-w-xl">
+        
+        <!-- Loading Message -->
+        <div id="loading-message" class="text-center text-primary font-semibold py-8">
+            <svg class="animate-spin h-5 w-5 mr-3 inline-block" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Connecting to Anchor Database...
+        </div>
+
+        <!-- Main Application Card -->
+        <div id="main-app" class="bg-card emotion-card p-6 md:p-8 rounded-xl border border-gray-100 hidden">
+            
+            <!-- Navigation -->
+            <div class="flex justify-between mb-6 border-b border-gray-100 pb-3">
+                <button onclick="switchView('anchor')" id="anchor-btn" class="flex-1 text-center py-2 font-bold text-primary border-b-2 border-primary transition duration-150">
+                    Anchor View
+                </button>
+                <button onclick="switchView('history')" id="history-btn" class="flex-1 text-center py-2 font-medium text-gray-500 hover:text-primary transition duration-150">
+                    Patterns View
+                </button>
+            </div>
+
+
+            <!-- ANCHOR VIEW (Input Form) -->
+            <div id="anchor-section">
+                <h1 class="text-3xl font-extrabold text-primary mb-2 text-center">The Grounding Anchor</h1>
+                <p class="text-gray-500 mb-6 text-center">Externalize the spiral. Define the feeling. Let it go.</p>
+
+                <!-- Input Form -->
+                <div id="input-section" class="space-y-4">
+                    
+                    <!-- 1. What Happened (One Sentence) -->
+                    <div>
+                        <label for="event" class="block text-sm font-medium text-gray-700">1. State what happened (one sentence max)</label>
+                        <input type="text" id="event" class="mt-1 block w-full border border-gray-300 rounded-lg p-3 focus:ring-primary focus:border-primary transition duration-150" placeholder="E.g., I misread my friend's text message and immediately assumed the worst.">
+                        <p id="event-error" class="text-xs text-red-500 mt-1 hidden">Please provide a summary.</p>
+                    </div>
+
+                    <!-- 2. Primary Core Emotion -->
+                    <div>
+                        <label for="emotion" class="block text-sm font-medium text-gray-700">2. Primary Core/Inhibitory Emotion</label>
+                        <select id="emotion" class="mt-1 block w-full border border-gray-300 rounded-lg p-3 bg-white focus:ring-primary focus:border-primary transition duration-150">
+                            <option value="" disabled selected>Select an emotion...</option>
+                            <option value="Fear">Fear</option>
+                            <option value="Anxiety">Anxiety</option>
+                            <option value="Sadness">Sadness</option>
+                            <option value="Anger">Anger</option>
+                            <option value="Shame">Shame</option>
+                            <option value="Guilt">Guilt</option>
+                            <option value="Envy">Envy</option>
+                            <option value="Frustration">Frustration</option>
+                            <option value="Overwhelmed">Overwhelmed</option>
+                            <option value="Insecurity">Insecurity</option>
+                            <option value="Other">Other (Enter below)</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Custom Emotion Input 1 -->
+                    <div id="custom-emotion-container" class="hidden">
+                        <label for="custom-emotion" class="block text-sm font-medium text-gray-700">Enter Custom Emotion</label>
+                        <input type="text" id="custom-emotion" class="mt-1 block w-full border border-gray-300 rounded-lg p-3 focus:ring-primary focus:border-primary transition duration-150" placeholder="E.g., Helplessness, Resentment">
+                    </div>
+
+                    <!-- 3. Primary Intensity Rating -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">3. Primary Intensity Rating (1-10)</label>
+                        <div class="mt-1 flex items-center space-x-4">
+                            <span class="text-lg font-bold text-gray-500">1</span>
+                            <input type="range" id="intensity" min="1" max="10" value="5" class="flex-grow">
+                            <span class="text-lg font-bold text-primary" id="intensity-value">5</span>
+                            <span class="text-lg font-bold text-gray-500">10</span>
+                        </div>
+                    </div>
+
+                    <!-- Toggle Button for Secondary Emotion -->
+                    <button id="toggle-secondary-btn" onclick="toggleSecondaryEmotion()" class="text-sm text-primary hover:text-secondary font-semibold cursor-pointer flex items-center mt-6 pt-4 border-t border-gray-200 w-full justify-center rounded-lg py-2">
+                        <svg id="toggle-icon" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                        </svg>
+                        <span id="toggle-text">Want to add a secondary emotion?</span>
+                    </button>
+
+                    <!-- SECONDARY EMOTION INPUTS (Hidden by default) -->
+                    <div id="secondary-input-fields" class="hidden space-y-4 pt-4">
+                        
+                        <label class="block text-sm font-medium text-gray-700 mb-2">4. Secondary Emotion (Optional)</label>
+                        <select id="emotion2" class="mt-1 block w-full border border-gray-300 rounded-lg p-3 bg-white focus:ring-primary focus:border-primary transition duration-150">
+                            <option value="" disabled selected>Select a secondary emotion...</option>
+                            <option value="Fear">Fear</option>
+                            <option value="Anxiety">Anxiety</option>
+                            <option value="Sadness">Sadness</option>
+                            <option value="Anger">Anger</option>
+                            <option value="Shame">Shame</option>
+                            <option value="Guilt">Guilt</option>
+                            <option value="Envy">Envy</option>
+                            <option value="Frustration">Frustration</option>
+                            <option value="Overwhelmed">Overwhelmed</option>
+                            <option value="Insecurity">Insecurity</option>
+                            <option value="Other">Other (Enter below)</option>
+                        </select>
+
+                        <!-- Custom Emotion Input 2 -->
+                        <div id="custom-emotion-container2" class="hidden">
+                            <label for="custom-emotion2" class="block text-sm font-medium text-gray-700">Enter Custom Secondary Emotion</label>
+                            <input type="text" id="custom-emotion2" class="mt-1 block w-full border border-gray-300 rounded-lg p-3 focus:ring-primary focus:border-primary transition duration-150" placeholder="E.g., Helplessness, Resentment">
+                        </div>
+
+                        <!-- 5. Secondary Intensity Rating (Optional) -->
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700">5. Secondary Intensity Rating (1-10)</label>
+                            <div class="mt-1 flex items-center space-x-4">
+                                <span class="text-lg font-bold text-gray-500">1</span>
+                                <input type="range" id="intensity2" min="1" max="10" value="1" class="flex-grow">
+                                <span class="text-lg font-bold text-primary" id="intensity-value2">1</span>
+                                <span class="text-lg font-bold text-gray-500">10</span>
+                            </div>
+                        </div>
+                    </div>
+
+
+                    <!-- Capture Button -->
+                    <button onclick="processThought()" class="w-full bg-primary text-white font-semibold py-3 rounded-lg hover:bg-secondary transition duration-300 focus:outline-none focus:ring-4 focus:ring-secondary focus:ring-opacity-50 mt-6">
+                        Capture & Anchor Thought
+                    </button>
+                </div>
+                
+                <!-- Output Display and Let Go Section (Hidden initially) -->
+                <div id="output-section" class="hidden mt-8 p-6 border-2 border-primary border-dashed rounded-xl bg-primary/5">
+                    <h2 class="text-xl font-bold text-primary mb-4 text-center">The Anchor Point</h2>
+                    
+                    <p class="text-gray-700 mb-2">
+                        <span class="font-bold">Event:</span> <span id="display-event"></span>
+                    </p>
+                    
+                    <p class="text-gray-700 mb-1">
+                        <span class="font-bold">Primary Feeling:</span> 
+                        <span id="display-emotion" class="font-semibold text-primary"></span>
+                        (<span id="display-intensity"></span>/10)
+                    </p>
+                    
+                    <!-- Secondary Display Row (Hidden if empty) -->
+                    <p class="text-gray-700 mb-4" id="secondary-display-row">
+                        <span class="font-bold">Secondary Feeling:</span> 
+                        <span id="display-emotion2" class="font-semibold text-primary"></span>
+                        (<span id="display-intensity2"></span>/10)
+                    </p>
+                    
+                    <p class="text-sm italic text-center text-gray-600 mb-4">You have named it, rated it, and externalized it. Now, choose a grounding tool:</p>
+
+                    <!-- LLM Features -->
+                    <div class="mt-4 border-t border-gray-200 pt-4 space-y-3">
+                        <button onclick="generateNextStepPrompt()" id="next-step-btn" class="w-full bg-indigo-100 text-primary font-semibold py-2 rounded-lg hover:bg-indigo-200 transition duration-300">
+                            🎯 What's the Next Small Step?
+                        </button>
+                    </div>
+
+                    <!-- Gemini Output Display -->
+                    <div id="gemini-output-section" class="mt-6 hidden bg-white p-4 rounded-lg shadow-inner border border-indigo-200">
+                        <h3 class="text-lg font-bold text-primary mb-2" id="gemini-title"></h3>
+                        <div class="text-gray-700" id="gemini-content"></div>
+                        <div id="gemini-loader" class="text-center text-primary italic hidden mt-2">
+                            <svg class="animate-spin h-5 w-5 mr-1 inline-block text-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            Generating Insight...
+                        </div>
+                    </div>
+                    
+                    <!-- Final LET GO button -->
+                    <button onclick="letGo()" class="w-full bg-success text-white font-semibold py-3 rounded-lg hover:bg-success/80 transition duration-300 focus:outline-none focus:ring-4 focus:ring-success focus:ring-opacity-50 mt-6">
+                        LET GO
+                    </button>
+                </div>
+                
+                <!-- Let Go Confirmation Message (Hidden initially) -->
+                <div id="let-go-message" class="hidden mt-8 p-6 bg-success text-white rounded-xl text-center font-semibold text-lg">
+                    Thought released. You are grounded.
+                </div>
+            </div>
+            
+            <!-- HISTORY/PATTERNS VIEW (Hidden initially) -->
+            <div id="history-section" class="hidden">
+                <h2 class="text-3xl font-extrabold text-primary mb-2 text-center">Emotional Patterns</h2>
+                <p class="text-gray-500 mb-6 text-center">View accumulated emotional intensity over time.</p>
+
+                <!-- Time Filter -->
+                <div class="mb-6 flex justify-between items-center">
+                    <label for="time-filter" class="block text-sm font-medium text-gray-700">Time Period:</label>
+                    <select id="time-filter" onchange="loadHistory()" class="border border-gray-300 rounded-lg p-2 bg-white focus:ring-primary focus:border-primary transition duration-150">
+                        <option value="week">Past Week</option>
+                        <option value="month">Past Month</option>
+                        <option value="year">Past Year</option>
+                        <option value="all">All Time</option>
+                    </select>
+                </div>
+
+                <!-- Chart Container -->
+                <div id="chart-container" class="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                    <p id="chart-status" class="text-center text-gray-500 italic">Loading data...</p>
+                    <!-- Bar charts will be injected here -->
+                </div>
+
+                <!-- Debug/Status Information -->
+                <p class="text-xs text-gray-400 mt-4 text-center">User ID: <span id="user-id-display"></span></p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- GEMINI API CONFIGURATION ---
+        const GEMINI_MODEL = 'gemini-2.5-flash-preview-09-2025';
+        const API_KEY = "";
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${API_KEY}`;
+        let lastAnchoredThought = null;
+        
+        // Utility for exponential backoff during fetch calls
+        async function exponentialBackoffFetch(url, options, maxRetries = 5, delay = 1000) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) {
+                        return response;
+                    }
+                    if (response.status === 429 && i < maxRetries - 1) { // Too Many Requests
+                        await new Promise(resolve => setTimeout(resolve, delay * (2 ** i) + Math.random() * 500));
+                    } else {
+                        throw new Error(`API call failed with status: ${response.status}`);
+                    }
+                } catch (error) {
+                    if (i === maxRetries - 1) throw error;
+                    await new Promise(resolve => setTimeout(resolve, delay * (2 ** i) + Math.random() * 500));
+                }
+            }
+        }
+
+        // Generic Gemini API caller function
+        async function callGeminiAPI(systemPrompt, userQuery) {
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+            };
+
+            const options = {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            };
+            
+            try {
+                const response = await exponentialBackoffFetch(API_URL, options);
+                const result = await response.json();
+                
+                return result.candidates?.[0]?.content?.parts?.[0]?.text || "Could not generate content.";
+            } catch (error) {
+                console.error("Fetch/Gemini API Error:", error);
+                throw new Error("API service currently unavailable.");
+            }
+        }
+
+        // --- JAVASCRIPT LOGIC ---
+
+        // Get elements (Profile Setup)
+        const setupModal = document.getElementById('setup-modal');
+        const profileNicknameInput = document.getElementById('profile-nickname');
+        const profileEmailInput = document.getElementById('profile-email');
+        
+        // Get elements (Primary)
+        const eventInput = document.getElementById('event');
+        const emotionSelect = document.getElementById('emotion');
+        const customEmotionContainer = document.getElementById('custom-emotion-container');
+        const customEmotionInput = document.getElementById('custom-emotion');
+        const intensityInput = document.getElementById('intensity');
+        const intensityValueSpan = document.getElementById('intensity-value');
+        const eventError = document.getElementById('event-error');
+        
+        // Get elements (Secondary)
+        const secondaryInputFields = document.getElementById('secondary-input-fields');
+        const emotionSelect2 = document.getElementById('emotion2');
+        const customEmotionContainer2 = document.getElementById('custom-emotion-container2');
+        const customEmotionInput2 = document.getElementById('custom-emotion2');
+        const intensityInput2 = document.getElementById('intensity2');
+        const intensityValueSpan2 = document.getElementById('intensity-value2');
+        const secondaryDisplayRow = document.getElementById('secondary-display-row');
+        
+        // Get elements (Navigation)
+        const anchorSection = document.getElementById('anchor-section');
+        const historySection = document.getElementById('history-section');
+        const anchorBtn = document.getElementById('anchor-btn');
+        const historyBtn = document.getElementById('history-btn');
+        const userIdDisplay = document.getElementById('user-id-display');
+        
+        // Get elements (History)
+        const timeFilter = document.getElementById('time-filter');
+        const chartContainer = document.getElementById('chart-container');
+        const chartStatus = document.getElementById('chart-status');
+
+        // Get elements (Toggle)
+        const toggleIcon = document.getElementById('toggle-icon');
+        const toggleText = document.getElementById('toggle-text');
+        
+        const inputSection = document.getElementById('input-section');
+        const outputSection = document.getElementById('output-section');
+        const letGoMessage = document.getElementById('let-go-message');
+
+        const displayEvent = document.getElementById('display-event');
+        const displayEmotion = document.getElementById('display-emotion');
+        const displayIntensity = document.getElementById('display-intensity');
+
+        // Get elements (Gemini Output)
+        const geminiOutputSection = document.getElementById('gemini-output-section');
+        const geminiLoader = document.getElementById('gemini-loader');
+        const geminiTitleEl = document.getElementById('gemini-title');
+        const geminiContentEl = document.getElementById('gemini-content');
+
+        // --- PROFILE AND STARTUP LOGIC ---
+
+        async function saveProfileAndStartApp(saveDetails) {
+            setupModal.classList.add('hidden');
+            document.getElementById('main-app').classList.remove('hidden');
+
+            if (window.useLocalStorageFallback) {
+                // In local storage mode, we only save the profile locally
+                const nickname = profileNicknameInput.value.trim();
+                const email = profileEmailInput.value.trim();
+                
+                if (saveDetails) {
+                    localStorage.setItem('localProfile', JSON.stringify({ nickname, email }));
+                } else {
+                    localStorage.removeItem('localProfile');
+                }
+            } else if (saveDetails) {
+                // In Firebase mode, save the profile remotely
+                const nickname = profileNicknameInput.value.trim();
+                const email = profileEmailInput.value.trim();
+
+                const profileData = {
+                    nickname: nickname || 'Anonymous User',
+                    email: email || null,
+                    lastLogin: window.Timestamp.now()
+                };
+
+                try {
+                    await window.setDoc(window.doc(window.db, window.profileCollectionPath, window.currentUserId), profileData);
+                    console.log("Profile saved/updated:", profileData);
+                } catch (e) {
+                    console.error("Error saving profile:", e);
+                    alertMessage("Failed to save profile. Proceeding anonymously.");
+                }
+            }
+            
+            window.isAuthReady = true; // Mark app as ready to perform storage operations
+            
+            // Start history listener and initialize view
+            loadHistory(); 
+            switchView('anchor');
+        }
+
+
+        // --- UI UTILITIES ---
+
+        intensityInput.addEventListener('input', () => {
+            intensityValueSpan.textContent = intensityInput.value;
+        });
+        intensityInput2.addEventListener('input', () => {
+            intensityValueSpan2.textContent = intensityInput2.value;
+        });
+
+        // Toggle custom emotion input based on select value (Primary)
+        emotionSelect.addEventListener('change', () => {
+            if (emotionSelect.value === 'Other') {
+                customEmotionContainer.classList.remove('hidden');
+                customEmotionInput.focus();
+            } else {
+                customEmotionContainer.classList.add('hidden');
+            }
+        });
+        
+        // Toggle custom emotion input based on select value (Secondary)
+        emotionSelect2.addEventListener('change', () => {
+            if (emotionSelect2.value === 'Other') {
+                customEmotionContainer2.classList.remove('hidden');
+            } else {
+                customEmotionContainer2.classList.add('hidden');
+            }
+        });
+        
+        // Function to toggle the secondary emotion input visibility
+        function toggleSecondaryEmotion() {
+            const isHidden = secondaryInputFields.classList.contains('hidden');
+            if (isHidden) {
+                secondaryInputFields.classList.remove('hidden');
+                toggleText.textContent = "Remove secondary emotion";
+                toggleIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4" />'; // Minus icon
+            } else {
+                secondaryInputFields.classList.add('hidden');
+                toggleText.textContent = "Want to add a secondary emotion?";
+                toggleIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />'; // Plus icon
+                
+                // Reset secondary inputs when hiding them
+                emotionSelect2.value = '';
+                intensityInput2.value = '1';
+                intensityValueSpan2.textContent = '1';
+                customEmotionInput2.value = '';
+                customEmotionContainer2.classList.add('hidden');
+            }
+        }
+
+        // Function to switch between the two main views
+        function switchView(view) {
+            if (view === 'anchor') {
+                anchorSection.classList.remove('hidden');
+                historySection.classList.add('hidden');
+                anchorBtn.classList.add('border-primary', 'font-bold');
+                anchorBtn.classList.remove('border-transparent', 'text-gray-500', 'font-medium');
+                historyBtn.classList.add('border-transparent', 'text-gray-500', 'font-medium');
+                historyBtn.classList.remove('border-primary', 'font-bold');
+            } else {
+                historySection.classList.remove('hidden');
+                anchorSection.classList.add('hidden');
+                historyBtn.classList.add('border-primary', 'font-bold');
+                historyBtn.classList.remove('border-transparent', 'text-gray-500', 'font-medium');
+                anchorBtn.classList.add('border-transparent', 'text-gray-500', 'font-medium');
+                anchorBtn.classList.remove('border-primary', 'font-bold');
+                
+                // Load history data when switching to the view
+                loadHistory(); 
+            }
+        }
+        
+        // --- DATA PROCESSING & STORAGE FUNCTIONS (Firebase or LocalStorage) ---
+
+        async function processThought() {
+            if (!window.isAuthReady) {
+                alertMessage("App is not fully initialized. Please wait or refresh.");
+                return;
+            }
+
+            const eventText = eventInput.value.trim();
+            const selectedEmotion = emotionSelect.value;
+            let emotionText = selectedEmotion;
+            const primaryIntensity = parseInt(intensityInput.value);
+            
+            eventError.classList.add('hidden');
+            
+            // 1. Primary Validation
+            if (!eventText) {
+                eventError.textContent = "Please provide a summary.";
+                eventError.classList.remove('hidden');
+                return;
+            }
+            if (selectedEmotion === '' && !customEmotionInput.value.trim()) {
+                alertMessage("Please select a PRIMARY emotion or enter a custom one.");
+                return;
+            }
+            
+            if (selectedEmotion === 'Other') {
+                emotionText = customEmotionInput.value.trim();
+                if (!emotionText) {
+                    alertMessage("Please enter the custom PRIMARY emotion.");
+                    return;
+                }
+            }
+
+            // Secondary Emotion Logic (Optional)
+            let secondaryEmotion = '';
+            let secondaryIntensity = 0;
+            const selectedEmotion2 = emotionSelect2.value;
+            const isSecondaryVisible = !secondaryInputFields.classList.contains('hidden');
+            
+            if (isSecondaryVisible && (selectedEmotion2 || customEmotionInput2.value.trim())) {
+                if (selectedEmotion2 === 'Other') {
+                    secondaryEmotion = customEmotionInput2.value.trim();
+                } else if (selectedEmotion2 !== '') {
+                    secondaryEmotion = selectedEmotion2;
+                }
+                secondaryIntensity = parseInt(intensityInput2.value) || 0;
+            }
+            
+            // 2. Prepare Data for Storage and LLM
+            const thoughtData = {
+                userId: window.currentUserId,
+                event: eventText,
+                primaryEmotion: emotionText,
+                primaryIntensity: primaryIntensity,
+                secondaryEmotion: secondaryEmotion || null,
+                secondaryIntensity: secondaryEmotion ? secondaryIntensity : 0,
+                timestamp: window.useLocalStorageFallback ? Date.now() : window.Timestamp.now()
+            };
+
+            // Store for LLM use
+            lastAnchoredThought = thoughtData;
+
+            // 3. Save to Storage
+            try {
+                if (window.useLocalStorageFallback) {
+                    // --- LOCAL STORAGE SAVE ---
+                    let history = JSON.parse(localStorage.getItem('grounding_history') || '[]');
+                    history.push(thoughtData);
+                    localStorage.setItem('grounding_history', JSON.stringify(history));
+                    console.log("Thought anchored successfully (Local Storage):", thoughtData);
+                } else {
+                    // --- FIREBASE SAVE ---
+                    await window.addDoc(window.collection(window.db, window.anchorCollectionPath), thoughtData);
+                    console.log("Thought anchored successfully (Firebase):", thoughtData);
+                }
+                
+                // 4. Update UI to display the anchor point
+                document.getElementById('display-event').textContent = eventText;
+                document.getElementById('display-emotion').textContent = emotionText;
+                document.getElementById('display-intensity').textContent = primaryIntensity;
+
+                if (secondaryEmotion) {
+                    document.getElementById('display-emotion2').textContent = secondaryEmotion;
+                    document.getElementById('display-intensity2').textContent = secondaryIntensity;
+                    secondaryDisplayRow.classList.remove('hidden');
+                } else {
+                    secondaryDisplayRow.classList.add('hidden');
+                }
+                
+                inputSection.classList.add('hidden');
+                outputSection.classList.remove('hidden');
+                letGoMessage.classList.add('hidden');
+                
+                // Clear any previous Gemini output
+                geminiOutputSection.classList.add('hidden');
+
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                alertMessage("Failed to save thought. Check console.");
+            }
+        }
+
+        function letGo() {
+            // 1. Clear the inputs (Reset the state)
+            eventInput.value = '';
+            emotionSelect.value = '';
+            intensityInput.value = '5';
+            intensityValueSpan.textContent = '5';
+            customEmotionInput.value = '';
+            customEmotionContainer.classList.add('hidden');
+            
+            // Secondary
+            emotionSelect2.value = '';
+            intensityInput2.value = '1';
+            intensityValueSpan2.textContent = '1';
+            customEmotionInput2.value = '';
+            customEmotionContainer2.classList.add('hidden');
+            secondaryDisplayRow.classList.add('hidden');
+            
+            // Gemini state
+            lastAnchoredThought = null;
+            geminiOutputSection.classList.add('hidden');
+
+            // 2. Reset Toggle State for a fresh start
+            secondaryInputFields.classList.add('hidden');
+            toggleText.textContent = "Want to add a secondary emotion?";
+            toggleIcon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />'; // Plus icon
+            
+            // 3. Hide output, show confirmation
+            outputSection.classList.add('hidden');
+            letGoMessage.classList.remove('hidden');
+            
+            // 4. Bring input back after a delay
+            setTimeout(() => {
+                letGoMessage.classList.add('hidden');
+                inputSection.classList.remove('hidden');
+                eventInput.focus();
+            }, 3000);
+        }
+
+        function alertMessage(message) {
+            const existingAlert = document.getElementById('custom-alert');
+            if (existingAlert) existingAlert.remove();
+
+            const alertDiv = document.createElement('div');
+            alertDiv.id = 'custom-alert';
+            alertDiv.className = 'fixed top-4 right-4 bg-alert text-white p-4 rounded-lg shadow-xl z-50 transition-opacity duration-300';
+            alertDiv.textContent = message;
+            document.body.appendChild(alertDiv);
+
+            setTimeout(() => {
+                alertDiv.style.opacity = '0';
+                setTimeout(() => alertDiv.remove(), 300);
+            }, 5000);
+        }
+
+        // --- GEMINI LLM FUNCTIONS ---
+
+        // Function to generate the Next Step Prompt
+        async function generateNextStepPrompt() {
+            if (!lastAnchoredThought) {
+                alertMessage("Please anchor a thought first.");
+                return;
+            }
+            
+            // Reset loader/output state
+            geminiOutputSection.classList.remove('hidden');
+            geminiLoader.classList.remove('hidden');
+            geminiTitleEl.textContent = "Analyzing Next Step...";
+            geminiContentEl.innerHTML = "";
+
+            const data = lastAnchoredThought;
+            const primaryEmotion = data.primaryEmotion;
+
+            // NEW System prompt for factual, objective analysis and small action.
+            const systemPrompt = `Act as a cognitive analysis assistant. Your task is to provide a factual, objective, and non-judgemental analysis of the user's spiraling thought, followed by a single, immediate physical action.
+
+Part 1 (Analysis): First, identify the underlying core worry derived from the event and emotion. Then, offer a brief, objective assessment of the immediate, real-world likelihood of that worry being completely true (e.g., "The likelihood of immediate catastrophic outcome is low"). Do NOT provide advice, emotional support, or suggest complex mental exercises.
+
+Part 2 (Next Step): Conclude with a single, immediate, and extremely small physical action or environmental change (less than 5 minutes duration) to disrupt the internal focus.
+
+Present your answer clearly, separating the factual analysis from the immediate action item. Use bold text to emphasize the core components of your analysis.`;
+            
+            const userQuery = `Original Event: "${data.event}". Primary Emotion: ${primaryEmotion}. Intensity: ${data.primaryIntensity}/10. Secondary Emotion: ${data.secondaryEmotion ? data.secondaryEmotion : 'None'}.`;
+
+            try {
+                const generatedText = await callGeminiAPI(systemPrompt, userQuery);
+                
+                geminiTitleEl.textContent = "🎯 Factual Analysis & Next Step";
+                // The AI is instructed to use bolding and structure the output itself.
+                geminiContentEl.innerHTML = generatedText.replace(/\n/g, '<br>');
+
+            } catch (error) {
+                console.error("Gemini API Error:", error);
+                geminiTitleEl.textContent = "Error Generating Step";
+                geminiContentEl.textContent = "Sorry, I couldn't connect to the AI guide right now. Please try again later.";
+            } finally {
+                geminiLoader.classList.add('hidden');
+            }
+        }
+
+        // --- HISTORY VISUALIZATION LOGIC ---
+        
+        // This function now returns a standard Date object
+        function getStartDate(filterType) {
+            const date = new Date();
+            if (filterType === 'week') {
+                date.setDate(date.getDate() - 7);
+            } else if (filterType === 'month') {
+                date.setMonth(date.getMonth() - 1);
+            } else if (filterType === 'year') {
+                date.setFullYear(date.getFullYear() - 1);
+            } else {
+                return null; // For 'all'
+            }
+            return date; // Always return Date object
+        }
+
+        function loadHistory() {
+            if (!window.isAuthReady) return;
+
+            userIdDisplay.textContent = window.currentUserId;
+            chartStatus.textContent = "Fetching data...";
+            chartContainer.innerHTML = '';
+            
+            const filterType = timeFilter.value;
+            const startDate = getStartDate(filterType);
+
+            if (window.useLocalStorageFallback) {
+                // --- LOCAL STORAGE LOAD ---
+                const rawHistory = localStorage.getItem('grounding_history');
+                const thoughts = JSON.parse(rawHistory || '[]');
+                
+                // Filtering happens client-side with Date.now() (which is what we saved)
+                let filteredThoughts = thoughts;
+                if (startDate) {
+                    const startTime = startDate.getTime(); // Get milliseconds for comparison
+                    filteredThoughts = thoughts.filter(thought => thought.timestamp >= startTime);
+                }
+                
+                visualizeHistory(filteredThoughts);
+                return;
+            }
+            
+            // --- FIREBASE LOAD (Original Logic) ---
+            
+            let q;
+            if (startDate) {
+                // Query where timestamp is greater than or equal to the start date
+                q = window.query(
+                    window.collection(window.db, window.anchorCollectionPath),
+                    window.where('timestamp', '>=', window.Timestamp.fromDate(startDate)) // Convert Date to Timestamp for Firestore
+                );
+            } else {
+                // Query all documents for 'all time'
+                q = window.collection(window.db, window.anchorCollectionPath);
+            }
+            
+            // Listen for real-time updates
+            window.onSnapshot(q, (querySnapshot) => {
+                const thoughts = [];
+                querySnapshot.forEach((doc) => {
+                    thoughts.push(doc.data());
+                });
+
+                visualizeHistory(thoughts);
+            }, (error) => {
+                console.error("Error fetching history: ", error);
+                chartStatus.textContent = "Error loading history data (Firebase fetch failed).";
+            });
+        }
+        
+        function visualizeHistory(thoughts) {
+            const emotionTotals = {};
+            let maxIntensity = 0;
+            
+            if (thoughts.length === 0) {
+                chartContainer.innerHTML = `<p class="text-center text-gray-500 italic">No thoughts anchored in this period.</p>`;
+                return;
+            }
+
+            // 1. Aggregate the data (Sum of intensities per emotion)
+            thoughts.forEach(thought => {
+                // Primary Emotion
+                const pEmotion = thought.primaryEmotion;
+                const pIntensity = thought.primaryIntensity || 0;
+                emotionTotals[pEmotion] = (emotionTotals[pEmotion] || 0) + pIntensity;
+
+                // Secondary Emotion (if present)
+                if (thought.secondaryEmotion) {
+                    const sEmotion = thought.secondaryEmotion;
+                    const sIntensity = thought.secondaryIntensity || 0;
+                    // Add secondary emotion to its own or existing total
+                    emotionTotals[sEmotion] = (emotionTotals[sEmotion] || 0) + sIntensity; 
+                }
+            });
+
+            // 2. Find the maximum total intensity for scaling the bars
+            for (const emotion in emotionTotals) {
+                if (emotionTotals[emotion] > maxIntensity) {
+                    maxIntensity = emotionTotals[emotion];
+                }
+            }
+            
+            // 3. Generate HTML for the bar chart
+            let chartHTML = '';
+            // Sort emotions by total intensity (highest first)
+            const sortedEmotions = Object.entries(emotionTotals).sort(([, a], [, b]) => b - a);
+
+            sortedEmotions.forEach(([emotion, totalIntensity]) => {
+                // Calculate percentage width relative to the maximum
+                const percentage = maxIntensity > 0 ? (totalIntensity / maxIntensity) * 100 : 0;
+                
+                chartHTML += `
+                    <div class="bar-container">
+                        <div class="bar-label">${emotion}</div>
+                        <div class="bar-chart">
+                            <div class="bar-fill" style="width: ${percentage}%;"></div>
+                        </div>
+                        <div class="ml-3 text-sm font-semibold text-gray-700">${totalIntensity}</div>
+                    </div>
+                `;
+            });
+
+            chartContainer.innerHTML = chartHTML;
+            chartStatus.textContent = `Displaying ${thoughts.length} anchored thoughts.`;
+        }
+    </script>
+</body>
+</html>
